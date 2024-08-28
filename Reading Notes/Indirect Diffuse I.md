@@ -152,9 +152,21 @@ $$C_d = \frac{I_z - C_a}{d_z}$$
 
 ### Spherical Harmonics
 
-GDC 2018: Precomputed Global Illumination in Frostbite
+SH lightmap可以参考Frostbite的分享[^13]。
 
 SH相对比较全能，但是储存开销也很高，所以一般只能用到不是很准确的Linear SH。在Baking的时候，先monte carlo sample出radiance的SH，然后和clamped cosine function convolve一下[^7]得到irradiance。在这个过程中可以简化一些计算，具体可以参考这篇博客[^8]。
+
+#### SH encoding
+
+在储存的时候，首先把 $L_1$的系数都除以$L_0$ (这里用的SH计算方式会保证 $0 \leq |f_1| \leq f_0$)，然后用4张RGB去存12个SH系数。$L_0$用HDR BC6H，$L_1$用LDR（因为压缩到$[0, 1]$了） BC7或者BC1。
+
+#### Approximating the Specular
+
+之前提到过AHD可以近似出specular的效果，实际上SH也可以。
+
+具体来说，用optimal linear direction当highlight direction，这和之前SH3转AHD是一样的；接着用 $L1$ 的长度模拟光源的集中程度，这点在介绍Linear SH的时候提过。在光源比较集中的时候想要更硬的高光，所以简单地给smoothness乘一个 $\sqrt{\lVert f_1\rVert}$，然后代入ggx specular计算。
+
+当然，这种做法的缺点也和AHD一样，就是对来自不同方向的光源效果不好，并且这种artifact对于smooth的表面特别明显。因此，默认只对特定范围roughness的表面用lightmap specular，其他的还是用传统的反射算法。
 
 #### Deringing
 
@@ -164,7 +176,21 @@ SH相对比较全能，但是储存开销也很高，所以一般只能用到不
 
 实际上，我们只需要normal map对应的半球信息，而SH则存了完整的球面信息，因此会有空间上的浪费。H-basis[^?]的思路是
 
-### 
+### Lightmap Baking
+
+Frostbite[^13]提到了一些lightmap baking的细节。
+
+path tracing需要ray origin和direction。
+
+对于origin，最直接的想法，就是取lightmap的每个texel中心。然而，lightmap分辨率很低，因此这么取很可能会漏掉texel内对最终光照有重要贡献的点。另外，物体的表面可能只覆盖了texel的一部分，但是没有覆盖到中心。解决办法就是用低差异序列做SSAA。
+
+在生成direction的时候，采用的是Halton sequence。相比Hammersley的好处，Halton是progressive的，也就是不需要提前指定spp，而是基于noise判断终止条件。由于Halton sequence是deterministic的，所以每个texel还要加入随机的偏移，防止每个像素都使用完全相同的一组方向，产生band-like artifacts。
+
+判断终止条件的时候，可以把样本当成normal distribution去计算running variance。由于实际上样本并不服从normal distribution，所以为了防止过早终止，可以一次性trace 数量上限10%的再做判断。
+
+###  Lightmap atlas
+
+
 
 ## References
 
@@ -188,6 +214,8 @@ SH相对比较全能，但是储存开销也很高，所以一般只能用到不
 
 [^10]: [2017 Precomputed Lighting in CoD: Infinite Warfare](https://research.activision.com/publications/archives/precomputed-lighting-in-call-of-dutyinfinite-warfare)
 
-[^12]: [Converting SH Radiance to Irradiance](https://grahamhazel.com/blog/2017/12/22/converting-sh-radiance-to-irradiance/)
+[^12]: [2017 Converting SH Radiance to Irradiance](https://grahamhazel.com/blog/2017/12/22/converting-sh-radiance-to-irradiance/)
+
+[^13]: [2018, Precomputed Global Illumination in Frostbite](https://www.ea.com/frostbite/news/precomputed-global-illumination-in-frostbite)
 
 [^?]: [2010 Efficient Irradiance Normal Mapping](https://publik.tuwien.ac.at/files/PubDat_189085.pdf)
