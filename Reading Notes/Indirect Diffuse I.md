@@ -171,6 +171,7 @@ SH相对比较全能，但是储存开销也很高，所以一般只能用到不
 #### Deringing
 
 参考[^12]. 我记得2020的CoD有更好的followup.
+Lightmap并不是很需要deringing? SH based可能需要，但是H-Basis完全不会采样到另外半球的信息。
 
 ### H-basis
 
@@ -184,11 +185,11 @@ path tracing需要ray origin和direction。
 
 对于origin，最直接的想法，就是取lightmap的每个texel中心。然而，lightmap分辨率很低，因此这么取很可能会漏掉texel内对最终光照有重要贡献的点。另外，物体的表面可能只覆盖了texel的一部分，但是没有覆盖到中心。解决办法就是用低差异序列做SSAA。
 
-在生成direction的时候，采用的是Halton sequence。相比Hammersley的好处，Halton是progressive的，也就是不需要提前指定spp，而是基于noise判断终止条件。由于Halton sequence是deterministic的，所以每个texel还要加入随机的偏移，防止每个像素都使用完全相同的一组方向，产生band-like artifacts。
+在生成direction的时候，采用的是Halton sequence。相比Hammersley的好处，Halton是progressive的，也就是不需要提前指定spp，而是基于noise判断终止条件。由于Halton sequence是deterministic的，所以每个texel还要加入随机的偏移，导致每个像素都使用完全相同的一组方向，产生band-like artifacts。
 
-判断终止条件的时候，可以把样本当成normal distribution去计算running variance。由于实际上样本并不服从normal distribution，所以为了防止过早终止，可以一次性trace 数量上限10%的再做判断。
+判断终止条件的时候，可以把样本当成normal distribution去计算running variance。当然实际上样本并不服从normal distribution，所以为了防止过早终止，可以每trace 数量上限10%的再做一次判断。
 
-###  Lightmap atlas
+### Lightmap Atlas
 
 
 
