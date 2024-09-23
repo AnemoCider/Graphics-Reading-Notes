@@ -1,4 +1,4 @@
-# Indirect Diffuse Lighting, I
+# 漫反射全局光照（1） - Lightmap
 
 ## 前言
 
@@ -76,7 +76,7 @@ $$k_d \frac{c}{\pi}$$
 - 只对静态光源、静态场景下的静态物体是准确的
 - lightmap的每个texel只有在对应到平面的时候才准确，因此对于几何形状比较复杂的小物体会有self-shadowing的问题
 
-另外，由于irradiance map的低频特性，在bake时无法使用高频的normal map（否则会出现采样频率跟不上实际频率导致的aliasing）。
+另外，由于irradiance map的低频特性，在bake时无法使用高频的normal map。
 
 ## Directional Lightmap
 
@@ -129,6 +129,11 @@ $$C_d = \frac{I_z - C_a}{d_z}$$
 
 将irradiance投影到AHD上并不直观，所以一般先投影到SH3，然后做一个least-square fit转换到AHD；或者也可以把Optimal Linear Direction当做highlight direction，然后限制z轴的irradiance相比SH3不变、限制ambient和directional color非负，去找一个最优解[^10]。[这篇知乎文章](https://zhuanlan.zhihu.com/p/701085097)详细地讲解了其中的数学过程。
 
+#### Hemispherical Bases
+
+除了AHD之外，还有一些定义在半球上的方案，例如H-Basis（或者其他的Hemispherical Harmonics, HSHs）[^14]这种类似于半球SH的，以及Half-life 2 Basis[^12] (又称Radiosity normal mapping, RNM) 这样用三个基向量表示的。
+
+
 
 #### AHD总结
 
@@ -139,11 +144,9 @@ $$C_d = \frac{I_z - C_a}{d_z}$$
 - 需要存的参数相对较少，只需要8个floats(direction = 2, RGB color * 2 = 6)
 - 相比SH有更强的contrast（美术和灯光师可能会比较喜欢这种效果）
 
-
 缺点是：
 
 - 因为只有一个dominant light方向，所以不能很好地表示来自不同方向的光照。如果把来自多个光源的直接光照也bake到AHD lightmap，就很容易会出现这种问题；RGB三个通道的dominant light direction不同的情况下，也会有很明显的问题。
-
 
 放和SH3的对比图：
 
@@ -160,6 +163,10 @@ SH相对比较全能，但是储存开销也很高，所以一般只能用到不
 
 在储存的时候，首先把 $L_1$的系数都除以$L_0$ (这里用的SH计算方式会保证 $0 \leq |f_1| \leq f_0$)，然后用4张RGB去存12个SH系数。$L_0$用HDR BC6H，$L_1$用LDR（因为压缩到$[0, 1]$了） BC7或者BC1。
 
+#### Sampling
+
+问题：linear interpolate SH的系数，是否就等价于linear interpolate radiance？
+
 #### Approximating the Specular
 
 之前提到过AHD可以近似出specular的效果，实际上SH也可以。
@@ -167,15 +174,6 @@ SH相对比较全能，但是储存开销也很高，所以一般只能用到不
 具体来说，用optimal linear direction当highlight direction，这和之前SH3转AHD是一样的；接着用 $L1$ 的长度模拟光源的集中程度，这点在介绍Linear SH的时候提过。在光源比较集中的时候想要更硬的高光，所以简单地给smoothness乘一个 $\sqrt{\lVert f_1\rVert}$，然后代入ggx specular计算。
 
 当然，这种做法的缺点也和AHD一样，就是对来自不同方向的光源效果不好，并且这种artifact对于smooth的表面特别明显。因此，默认只对特定范围roughness的表面用lightmap specular，其他的还是用传统的反射算法。
-
-#### Deringing
-
-参考[^12]. 我记得2020的CoD有更好的followup.
-Lightmap并不是很需要deringing? SH based可能需要，但是H-Basis完全不会采样到另外半球的信息。
-
-### H-basis
-
-实际上，我们只需要normal map对应的半球信息，而SH则存了完整的球面信息，因此会有空间上的浪费。H-basis[^?]的思路是
 
 ### Lightmap Baking
 
@@ -189,9 +187,29 @@ path tracing需要ray origin和direction。
 
 判断终止条件的时候，可以把样本当成normal distribution去计算running variance。当然实际上样本并不服从normal distribution，所以为了防止过早终止，可以每trace 数量上限10%的再做一次判断。
 
+#### Lightmap UV
+
+lightmap和normal map往往采用各自单独的uv，所以他们tangent space是不一样的。如果想用直接在tangent space里结合normal与directional lightmap得到光照的话，需要在baking的时候就转换到normal map的tangent space里。这相当于lightmap的uv只提供位置信息用于存储和采样，而不会用于计算tangent space[^14]。
+
 ### Lightmap Atlas
 
+在存储lightmap的时候，一般先把物体拆成许多chunk，然后每个chunk单独参数化，从而得到texture space里相互不重叠的chart，最后把chart pack到atlas上。
 
+color bleeding问题：除了chart之间不重叠之外，我们还希望在采样的时候不会bilinear filter到别的chart上面去，否则会产生错误的color bleeding（这也是不对lightmap做miipmap的原因之一[^2]）。一种做法是把filter会采样到的区域也标记为occupied，也就是把chart的边界向外扩张一些。
+
+seam问题：chart之间是分开参数化的，因此在chart的接缝处容易出现不连续的情况，所以需要额外的算法来处理（几何方向的论文完全看不懂w）
+
+pack到atlas上[^13]：思路是，先把更难找到位置的chart放上去，然后再放更容易的来填充holes。例如，1024x1的chart就比32x32的要更难放上去。在放上去的时候需要按行遍历找到第一个能放进去的位置。这里的遍历可以从上一次成功放进去的位置开始，而如果当前的chart比上一个更容易放进去，就需要从头开始遍历（因为要填之前的hole）。
+
+这里放frostbite的对比图：
+
+
+
+## 想填的坑
+
+读懂这两篇[^15][^16]。
+
+## 结语
 
 ## References
 
@@ -199,9 +217,9 @@ path tracing需要ray origin和direction。
 
 [^2]: [Real Time Rendering](https://www.realtimerendering.com/)
 
-[^3]: [Directional Lightmap, Unity Doc](https://docs.unity3d.com/6000.0/Documentation/Manual/LightmappingDirectional.html)
+[^3]: [2015 Lighting in Unity](https://gdcvault.com/play/1021765/Advanced-Visual-Effects-With-DirectX)
 
-[^4]: [2013 Lighting Technology of The Last of Us](http://miciwan.com/SIGGRAPH2013/Lighting%20Technology%20of%20The%20Last%20Of%20Us.pdf)
+[^4]: [2013 Lighting Technology of The Last of Us](http://miciwan.com/SIGGRAPH2013/Lighting Technology of The Last Of Us.pdf)
 
 [^5]: [2018 Directional Lightmap Encoding Insights](https://www.ppsloan.org/publications/lmap-sabrief18.pdf)
 
@@ -215,8 +233,13 @@ path tracing需要ray origin和direction。
 
 [^10]: [2017 Precomputed Lighting in CoD: Infinite Warfare](https://research.activision.com/publications/archives/precomputed-lighting-in-call-of-dutyinfinite-warfare)
 
-[^12]: [2017 Converting SH Radiance to Irradiance](https://grahamhazel.com/blog/2017/12/22/converting-sh-radiance-to-irradiance/)
+[^12]: [2007 Efficient Self-Shadowed Radiosity Normal Mapping](https://cdn.akamai.steamstatic.com/apps/valve/2007/SIGGRAPH2007_EfficientSelfShadowedRadiosityNormalMapping.pdf)
 
-[^13]: [2018, Precomputed Global Illumination in Frostbite](https://www.ea.com/frostbite/news/precomputed-global-illumination-in-frostbite)
+[^13]: [2018 Precomputed Global Illumination in Frostbite](https://www.ea.com/frostbite/news/precomputed-global-illumination-in-frostbite)
 
-[^?]: [2010 Efficient Irradiance Normal Mapping](https://publik.tuwien.ac.at/files/PubDat_189085.pdf)
+[^14]: [2010 Efficient Irradiance Normal Mapping](https://publik.tuwien.ac.at/files/PubDat_189085.pdf)
+
+[^15]: [2020 Precomputed Lighting Advances in Call of Duty: Modern Warfare](https://research.activision.com/publications/2020-09/precomputed-lighting-advances-in-call-of-duty--modern-warfare)
+
+[^16]: [2024 Hemispherical Lighting Insights](https://www.ppsloan.org/publications/hemilightTR.pdf)
+
